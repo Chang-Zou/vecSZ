@@ -7,7 +7,8 @@ optimize ?= True
 
 CC = gcc
 CXX = g++
-CPPFLAGS = -Wall
+CPPFLAGS = -Wall -DNDEBUG -std=gnu++14 -MD -MT
+#-mtune=native -fopenmp -O3
 CFLAGS =
 
 BUILD_DIR := ./build

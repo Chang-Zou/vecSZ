@@ -3,12 +3,97 @@
 
 #include <cstddef>
 #include <math.h>
+#include <vector> 
 #include <immintrin.h> //avx intrinsics
 
 #include "types.hh"
 #include "constants.hh"
 #include "utils/padding.hh"
 #include "argument_parser/argparse.hh"
+#include "/home/changfz/include/xsimd/xsimd.hpp"
+
+namespace xs = xsimd;
+struct lorenzo_1d1l_NonManual
+{
+  template<typename T, typename Tag, typename Arch>
+  void operator()(Arch, T* data, double const *const ebs_L4,Tag)
+  {
+    // defines the simd_type used in this operation.
+    using simd_type = xs::batch<float,Arch>;
+    // determine size of instruction and how many loops.
+    std::size_t increment = simd_type::size;
+    std::size_t size = sizeof(*data);
+    std::size_t vec_size = size - size % increment;
+    // defines variable of simd_type.
+    simd_type vdata, veb, vres;
+    for(std::size_t id = 0; id < vec_size; id+=increment)
+    {
+      vdata = simd_type::load(&data[id],Tag());
+      veb = ebs_L4[EBx2_r];
+      vres = xs::round(xs::mul(vdata,veb));
+      xs::store(&data[id],vres,Tag());
+    }
+    for (size_t id = vec_size; id < size; id++) //Handle leftovers sequentially
+        {
+          data[id] = round(data[id] * ebs_L4[EBx2_r]);
+        } // end prequantization
+  }
+};
+
+/*
+struct lorenzo_1d1l_NonManual_post
+{
+  template<typename T, typename Tag, typename Arch>
+  void operator()(Arch, T*data, T padding,size_t _idx0, auto radius, T* outlier,Tag)
+  {
+    // defines the simd_type used in this operation.
+    using simd_type = xs::batch<float,Arch>;
+    using simd_type_int = xs::batch<int,Arch>;
+    // determine size of instruction and how many loops.
+    size_t increment = simd_type::size;
+    size_t size = data.size();
+    size_t vec_size = size - size % increment;
+
+    // variable for postquants
+    simd_type vpad = padding;
+    simd_type vradius = radius;
+    simd_type current;
+    simd_type vdata;
+    simd_type vpred;
+    simd_type vposterr;
+    simd_type absposterr;
+    simd_type vquant;
+    simd_type_int _code;
+    simd_type voutlier;
+    simd_type_int vbcode;
+
+    for(size_t id = 0; id < vec_size; id+=increment)
+    {
+      current = xs::load(&data[id],Tag());
+      vdata = xs::load(&data[id -1],Tag());
+      if(id < _idx0 + 1){
+        // using select as conditional but what is the mask?
+        // or using mask but its batch_bool what does that mean?
+        vpred = xs::select(,vpad,vdata);
+      }else{
+        vpred = vdata;
+      }
+      vposterr = xs::sub(current,vpred);
+      absposterr = xs::sqrt(xs::mul(vposterr,vposterr));
+      vquant = xs:lt(absposterr,vradius);
+      _code = xs::to_int(xs:add(vposterr,vradius));
+      voutlier = xs::bitwise_andnot(vquant,current);
+      vbcode =xs::bitwise_and(vquant,_code);
+
+      xs::store(&outlier[id],voutlier,Tag());
+      //mask store what does that mean?
+      
+    }
+
+  }
+
+};
+*/
 
 namespace vecsz
 {
@@ -44,7 +129,7 @@ namespace vecsz
       {
           padding = pad_vals[0];
       }
-
+/*
       // prequantization with AVX
 #ifdef AVX512
       __m512 vebx2;
@@ -55,6 +140,7 @@ namespace vecsz
 #endif
       const __m256 veb_256 = _mm256_set1_ps(ebs_L4[EBx2_r]);
       const __m128 veb_128 = _mm_set1_ps(ebs_L4[EBx2_r]);
+*/      
       size_t id = _idx0;
 
       size_t blk_end = _idx0 + blksz;
@@ -64,6 +150,7 @@ namespace vecsz
 
       if (id < dims_L16[LEN])
       {
+/*
 #ifdef AVX512
         if (vector_reg == 512)
         {
@@ -80,6 +167,7 @@ namespace vecsz
           }
         }
 #endif
+  
         for (; id < blk_end8; id += 8) //AVX-256
         {
           //load into avx registers
@@ -108,6 +196,10 @@ namespace vecsz
         {
           data[id] = round(data[id] * ebs_L4[EBx2_r]);
         } // end prequantization
+      }
+*/
+      // prequantization based on any arch. Computer Decide which one
+      xs::dispatch(lorenzo_1d1l_NonManual{})(data,ebs_L4,xs::aligned_mode());
       }
 
       // postquantization
@@ -176,6 +268,8 @@ namespace vecsz
           _mm256_storeu_ps(&outlier[id], voutlier);
           _mm256_maskstore_epi32(&bcode[id], mask, vbcode);
         }
+
+
         for (; id < blksz; id++)
         {
           T pred = id < _idx0 + 1 ? padding : data[id - 1];
