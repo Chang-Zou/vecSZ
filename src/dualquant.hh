@@ -13,17 +13,19 @@
 #include "/home/changfz/include/xsimd/xsimd.hpp"
 
 namespace xs = xsimd;
-struct lorenzo_1d1l_NonManual
+struct lorenzo_1d1l_prequantization
 {
   template<typename T, typename Tag, typename Arch>
-  void operator()(Arch, T* data, double const *const ebs_L4,Tag)
+  void operator()(Arch, T* data, double const *const ebs_L4, size_t blk_end, Tag)
   {
-    // defines the simd_type used in this operation.
+    // defines the simd_instruction sets used in this operation.
     using simd_type = xs::batch<float,Arch>;
-    // determine size of instruction and how many loops.
+
+    // determine how many iteration to run
     std::size_t increment = simd_type::size;
-    std::size_t size = sizeof(*data);
+    std::size_t size = blk_end;
     std::size_t vec_size = size - size % increment;
+
     // defines variable of simd_type.
     simd_type vdata, veb, vres;
     for(std::size_t id = 0; id < vec_size; id+=increment)
@@ -33,67 +35,13 @@ struct lorenzo_1d1l_NonManual
       vres = xs::round(xs::mul(vdata,veb));
       xs::store(&data[id],vres,Tag());
     }
-    for (size_t id = vec_size; id < size; id++) //Handle leftovers sequentially
+    for (size_t id = vec_size; id < size; ++id) //Handle leftovers sequentially
         {
           data[id] = round(data[id] * ebs_L4[EBx2_r]);
         } // end prequantization
   }
 };
 
-/*
-struct lorenzo_1d1l_NonManual_post
-{
-  template<typename T, typename Tag, typename Arch>
-  void operator()(Arch, T*data, T padding,size_t _idx0, auto radius, T* outlier,Tag)
-  {
-    // defines the simd_type used in this operation.
-    using simd_type = xs::batch<float,Arch>;
-    using simd_type_int = xs::batch<int,Arch>;
-    // determine size of instruction and how many loops.
-    size_t increment = simd_type::size;
-    size_t size = data.size();
-    size_t vec_size = size - size % increment;
-
-    // variable for postquants
-    simd_type vpad = padding;
-    simd_type vradius = radius;
-    simd_type current;
-    simd_type vdata;
-    simd_type vpred;
-    simd_type vposterr;
-    simd_type absposterr;
-    simd_type vquant;
-    simd_type_int _code;
-    simd_type voutlier;
-    simd_type_int vbcode;
-
-    for(size_t id = 0; id < vec_size; id+=increment)
-    {
-      current = xs::load(&data[id],Tag());
-      vdata = xs::load(&data[id -1],Tag());
-      if(id < _idx0 + 1){
-        // using select as conditional but what is the mask?
-        // or using mask but its batch_bool what does that mean?
-        vpred = xs::select(,vpad,vdata);
-      }else{
-        vpred = vdata;
-      }
-      vposterr = xs::sub(current,vpred);
-      absposterr = xs::sqrt(xs::mul(vposterr,vposterr));
-      vquant = xs:lt(absposterr,vradius);
-      _code = xs::to_int(xs:add(vposterr,vradius));
-      voutlier = xs::bitwise_andnot(vquant,current);
-      vbcode =xs::bitwise_and(vquant,_code);
-
-      xs::store(&outlier[id],voutlier,Tag());
-      //mask store what does that mean?
-      
-    }
-
-  }
-
-};
-*/
 
 namespace vecsz
 {
@@ -129,78 +77,12 @@ namespace vecsz
       {
           padding = pad_vals[0];
       }
-/*
-      // prequantization with AVX
-#ifdef AVX512
-      __m512 vebx2;
-      if (vector_reg == 512)
-      {
-        const __m512 vebx2 = _mm512_set1_ps(ebs_L4[EBx2_r]);
-      }
-#endif
-      const __m256 veb_256 = _mm256_set1_ps(ebs_L4[EBx2_r]);
-      const __m128 veb_128 = _mm_set1_ps(ebs_L4[EBx2_r]);
-*/      
-      size_t id = _idx0;
 
       size_t blk_end = _idx0 + blksz;
-      size_t blk_end16 = (blk_end & ~0xF);
-      size_t blk_end8 = (blk_end & ~0x7);
-      size_t blk_end4 = (blk_end & ~0x3);
+    
+      // prequantization based on any arch. Xsimd decides the best architectures that is being supported by this computer
+      xs::dispatch<xs::supported_architectures>(lorenzo_1d1l_prequantization{})(data,ebs_L4,blk_end, xs::unaligned_mode());
 
-      if (id < dims_L16[LEN])
-      {
-/*
-#ifdef AVX512
-        if (vector_reg == 512)
-        {
-          for (; id < blk_end16; id += 16) //AVX-512
-          {
-            //load into avx registers
-            const __m512 vdata = _mm512_loadu_ps(&data[id]);
-
-            //perform mulitply and round
-            const __m512 vres = _mm512_roundscale_ps(_mm512_mul_ps(vdata, vebx2), (_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
-
-            //store result
-            _mm512_storeu_ps(&data[id], vres);
-          }
-        }
-#endif
-  
-        for (; id < blk_end8; id += 8) //AVX-256
-        {
-          //load into avx registers
-          const __m256 vdata = _mm256_loadu_ps(&data[id]);
-
-          //perform mulitply and round
-          const __m256 vres = _mm256_round_ps(_mm256_mul_ps(vdata, veb_256), (_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
-
-          //store result
-          _mm256_storeu_ps(&data[id], vres);
-        }
-
-        for (; id < blk_end4; id += 4) //AVX-128
-        {
-          //load into avx registers
-          const __m128 vdata = _mm_loadu_ps(&data[id]);
-
-          //perform mulitply and round
-          const __m128 vres = _mm_round_ps(_mm_mul_ps(vdata, veb_128), (_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
-
-          //store result
-          _mm_storeu_ps(&data[id], vres);
-        }
-
-        for (; id < (_idx0 + blksz); id++) //Handle leftovers sequentially
-        {
-          data[id] = round(data[id] * ebs_L4[EBx2_r]);
-        } // end prequantization
-      }
-*/
-      // prequantization based on any arch. Computer Decide which one
-      xs::dispatch(lorenzo_1d1l_NonManual{})(data,ebs_L4,xs::aligned_mode());
-      }
 
       // postquantization
       if (id < dims_L16[DIM0])
