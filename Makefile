@@ -7,7 +7,7 @@ optimize ?= True
 
 CC = gcc
 CXX = g++
-CPPFLAGS = -Wall -DNDEBUG -std=gnu++14 -MD -MT
+CPPFLAGS = -Wall -march=native -mtune=native -std=gnu++14 -MD -MT
 #-mtune=native -fopenmp -O3
 CFLAGS =
 

@@ -12,6 +12,7 @@
 #include "argument_parser/argparse.hh"
 #include "/home/changfz/include/xsimd/xsimd.hpp"
 
+// use Hacc
 namespace xs = xsimd;
 struct lorenzo_1d1l_prequantization
 {
@@ -23,8 +24,8 @@ struct lorenzo_1d1l_prequantization
 
     // determine how many iteration to run
     std::size_t increment = simd_type::size;
-    std::size_t blk_end = blk_end;
-    std::size_t maxSimdSize = blk_end - blk_end % increment;
+    std::size_t blk_endSize = blk_end;
+    std::size_t maxSimdSize = blk_endSize - blk_endSize % increment;
 
     // defines variable of simd_type.
     simd_type vdata, veb, vres;
@@ -37,22 +38,22 @@ struct lorenzo_1d1l_prequantization
       xs::store(&data[(*id)],vres,Tag());
     }
     for (*id = maxSimdSize; *id < blk_end; ++(*id)) //Handle leftovers sequentially
-        {
-          data[(*id)] = round(data[(*id)] * ebs_L4[EBx2_r]);
-        } // end prequantization
+    {
+      data[(*id)] = round(data[(*id)] * ebs_L4[EBx2_r]);
+    } // end prequantization
   }
 };
 
-
+/*
 struct lorenzo_1d1l_postquantization
 {
   template<typename T, typename Q, typename Tag, typename Arch>
   void operator()(Arch, T* data, T* outlier, T padding, Q* bcode, auto radius, double const *const ebs_L4, size_t blk_end, size_t *id, size_t _idx0, Tag)
   {
     // defines the simd_instruction sets used in this operation.
-    using simd_type = xs::batch<float,Arch>;
-    using simd_type_int = xs::batch<int,Arch>;
-    using simd_bool = xs::batch_bool<float,Arch>;
+    using simd_type = xs::batch<T,Arch>;
+    using simd_type_int = xs::batch<size_t,Arch>;
+    using simd_bool = xs::batch_bool<T,Arch>;
 
     // determine how many iteration to run
     std::size_t increment = simd_type::size;
@@ -88,7 +89,7 @@ struct lorenzo_1d1l_postquantization
     
   }
 };
-
+*/
 
 namespace vecsz
 {
@@ -132,13 +133,106 @@ namespace vecsz
       if(id < dims_L16[LEN])
       {
         //Xsimd decides the best architectures that is being supported by this computer
-        xs::dispatch<xs::supported_architectures>(lorenzo_1d1l_prequantization{})(data,ebs_L4,blk_end, &id, xs::unaligned_mode());
+        xs::dispatch<xs::supported_architectures>(lorenzo_1d1l_prequantization{})(data,ebs_L4, blk_end, &id, xs::unaligned_mode());
       }
 
-
-      // postquantization
+       // postquantization
       if (id < dims_L16[DIM0])
       {
+        size_t id = _idx0;
+        size_t blk_end = _idx0 + blksz;
+        size_t blk_end16 = (blk_end & ~0xF);
+        size_t blk_end8 = (blk_end & ~0x7);
+
+#ifdef AVX512
+        if (vector_reg == 512)
+        {
+          const __m512 vebx2 = _mm512_set1_ps(ebs_L4[EBx2_r]);
+          const __m512 vpad  = _mm512_set1_ps(padding);
+          const __m512 vradius = _mm512_set1_ps(radius);
+          __mmask16 pMask_512 = _mm512_int2mask(0xFFFE);
+          __m512 vpred,vzero;
+
+          for (; id < blk_end16; id += 16)
+          {
+            __m512 current = _mm512_loadu_ps(&data[id]);
+            if (id < _idx0 + 1)
+               vpred = _mm512_maskz_loadu_ps(pMask_512, &data[id - 1]); 
+              //vpred = _mm512_mask_blend_ps(pMask_512, &data[id - 1], vpad);
+            else
+              vpred = _mm512_loadu_ps(&data[id - 1]);
+            __m512 vposterr = _mm512_sub_ps(current, vpred);
+            __mmask16 vquant = _mm512_cmp_ps_mask(_mm512_abs_ps(vposterr), vradius, 1);
+            __mmask16 vnquant = _mm512_cmp_ps_mask(vradius, _mm512_abs_ps(vposterr), 1);
+            __m512i _code = _mm512_cvtps_epi32(_mm512_add_ps(vposterr, vradius));
+            __m512 voutlier = _mm512_mask_blend_ps(vquant, current, vzero);
+            __m512i vbcode = _mm512_mask_blend_epi32(vquant, _mm512_setzero_epi32(), _code);
+
+            _mm512_storeu_ps(&outlier[id], voutlier);
+            _mm512_mask_storeu_epi32(&bcode[id], vquant, vbcode);
+            _mm512_mask_storeu_epi32(&bcode[id], vnquant, _mm512_setzero_epi32());
+          }
+        }
+#endif
+
+        const __m256 vradius_256 = _mm256_set1_ps(radius);
+        const __m256 vpad  = _mm256_set1_ps(padding);
+        const __m256i mask = _mm256_set1_epi32(0xFFFFFFFF);
+        __m256i pMask_256 = _mm256_set_epi32(0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0);
+
+        for (; id < blk_end8; id += 8)
+        {
+          __m256 current = _mm256_loadu_ps(&data[id]);
+          __m256 vdata   = _mm256_loadu_ps(&data[id - 1]);
+          __m256 vpred;
+          /* __m256 vpred; */
+          if (id < _idx0 + 1)
+            vpred   = _mm256_blend_ps(vpad, vdata, 0xFE);
+          /*   vpred = _mm256_maskload_ps(&data[id - 1], pMask_256); */
+          else
+            vpred   = vdata;
+          /*   vpred = _mm256_loadu_ps(&data[id - 1]); */
+          __m256 vposterr = _mm256_sub_ps(current, vpred);
+          __m256 absposterr = _mm256_sqrt_ps(_mm256_mul_ps(vposterr, vposterr));
+          __m256 vquant = _mm256_cmp_ps(absposterr, vradius_256, 1);
+          __m256i _code = _mm256_cvtps_epi32(_mm256_add_ps(vposterr, vradius_256));
+          __m256 voutlier = _mm256_andnot_ps(vquant, current);
+          __m256i vbcode = _mm256_cvtps_epi32(_mm256_and_ps(vquant, _mm256_cvtepi32_ps(_code)));
+
+          _mm256_storeu_ps(&outlier[id], voutlier);
+          _mm256_maskstore_epi32(&bcode[id], mask, vbcode);
+        }
+        for (; id < blksz; id++)
+        {
+          T pred = id < _idx0 + 1 ? padding : data[id - 1];
+          T posterr = data[id] - pred;
+          bool quantizable = fabs(posterr) < radius;
+          Q _code = static_cast<Q>(posterr + radius);
+          outlier[id] = (1 - quantizable) * data[id]; //OLD CODE
+          //data[id]         = (1 - quantizable) * data[id];   //NEW CODE
+          bcode[id] = quantizable * _code;
+        }
+      }
+      else
+      {
+        for (size_t i0 = 0; i0 < blksz; i0++)
+        {
+          size_t id = _idx0 + i0;
+          if (id >= dims_L16[DIM0])
+            continue;
+          T pred = id < _idx0 + 1 ? padding : data[id - 1];
+          T posterr = data[id] - pred;
+          bool quantizable = fabs(posterr) < radius;
+          Q _code = static_cast<Q>(posterr + radius);
+          outlier[id] = (1 - quantizable) * data[id]; //OLD CODE
+          //data[id]         = (1 - quantizable) * data[id];   //NEW CODE
+          bcode[id] = quantizable * _code;
+        }
+      }
+
+      // postquantization
+      //if (id < dims_L16[DIM0])
+     // {
         // size_t id = _idx0;
         // size_t blk_end = _idx0 + blksz;
 
@@ -152,9 +246,9 @@ namespace vecsz
         //   //data[id]         = (1 - quantizable) * data[id];   //NEW CODE
         //   bcode[id] = quantizable * _code;
         // }
-      }
-      else
-      {
+     // }
+    //  else
+     // {
         // for (size_t i0 = 0; i0 < blksz; i0++)
         // {
         //   size_t id = _idx0 + i0;
@@ -168,10 +262,10 @@ namespace vecsz
         //   //data[id]         = (1 - quantizable) * data[id];   //NEW CODE
         //   bcode[id] = quantizable * _code;
         // }
-      }
+     // }
     }
 
-    template <typename T, typename Q>
+template <typename T, typename Q>
     void c_lorenzo_2d1l(T *data,
                         T *outlier,
                         Q *bcode,
